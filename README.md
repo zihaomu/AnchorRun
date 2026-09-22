@@ -50,7 +50,7 @@ Host gpu-lab
 Verify that non-interactive SSH works before configuring AnchorRun:
 
 ```bash
-ssh gpu-lab 'hostname && id -un'
+ssh -o BatchMode=yes gpu-lab 'hostname && id -un'
 ```
 
 AnchorRun accepts an SSH configuration alias such as `gpu-lab`; do not put SSH
@@ -209,6 +209,16 @@ Artifact paths are relative to `remote_root`. With `workdir: /workspace`, a
 program that writes `/workspace/outputs/result.json` creates
 `remote_root/outputs/result.json` on the remote host. The mapping above pulls it
 to `artifacts/outputs/result.json` locally.
+
+The declared remote directories must exist before `pull`. To verify the complete
+flow before the project produces real artifacts, create deterministic smoke-test
+files in both declared directories:
+
+```bash
+anchorrun exec -- bash -lc 'mkdir -p outputs reports &&
+  printf "%s\n" "AnchorRun output smoke test" > outputs/anchorrun-smoke.txt &&
+  printf "%s\n" "AnchorRun report smoke test" > reports/anchorrun-smoke.txt'
+```
 
 ```bash
 anchorrun pull --dry-run
