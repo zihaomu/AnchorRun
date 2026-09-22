@@ -15,7 +15,7 @@ from anchorrun.commands import (
     build_remote_mkdir,
     build_sync_command,
 )
-from anchorrun.errors import CommandError, ConfigError
+from anchorrun.errors import CommandError, CommandStartError, ConfigError
 from anchorrun.model import TargetConfig, WorkspaceConfig
 
 
@@ -66,7 +66,10 @@ def run_command(
     print(f"+ {format_command(command)}", file=sys.stderr)
     if dry_run:
         return
-    completed = subprocess.run(list(command), check=False)
+    try:
+        completed = subprocess.run(list(command), check=False)
+    except OSError as exc:
+        raise CommandStartError(name, str(exc)) from exc
     if completed.returncode != 0:
         raise CommandError(name, completed.returncode)
 
@@ -119,6 +122,17 @@ def probe_target(target: TargetConfig, timeout_seconds: int = 20) -> RemoteProbe
             remote_path_writable=False,
             user=None,
             message=f"SSH probe timed out after {timeout_seconds}s",
+        )
+    except OSError as exc:
+        return RemoteProbe(
+            target=target.name,
+            ssh_host=target.ssh_host,
+            reachable=False,
+            runtime_available=False,
+            image_present=False,
+            remote_path_writable=False,
+            user=None,
+            message=f"SSH probe could not start: {exc}",
         )
 
     if completed.returncode != 0:

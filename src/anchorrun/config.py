@@ -20,9 +20,43 @@ from anchorrun.model import (
 CONFIG_FILENAME = ".anchorrun.yaml"
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _SSH_ALIAS_RE = _NAME_RE
-_IMAGE_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-fA-F]{64}$")
+_IMAGE_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-fA-F]{64}$"
+)
 _ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_REMOTE_ABSOLUTE_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
+_REMOTE_RELATIVE_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 _RUNTIMES = {"docker", "podman"}
+
+
+class _StrictSafeLoader(yaml.SafeLoader):
+    def construct_mapping(
+        self,
+        node: yaml.MappingNode,
+        deep: bool = False,
+    ) -> dict[Any, Any]:
+        self.flatten_mapping(node)
+        mapping: dict[Any, Any] = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                hash(key)
+            except TypeError as exc:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    "found an unhashable key",
+                    key_node.start_mark,
+                ) from exc
+            if key in mapping:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"found duplicate key {key!r}",
+                    key_node.start_mark,
+                )
+            mapping[key] = self.construct_object(value_node, deep=deep)
+        return mapping
 
 
 def _mapping(value: Any, path: str) -> Mapping[str, Any]:
@@ -38,6 +72,14 @@ def _sequence(value: Any, path: str) -> Sequence[Any]:
 
 
 def _reject_unknown(data: Mapping[str, Any], allowed: set[str], path: str) -> None:
+    non_string_keys = sorted(
+        (repr(key) for key in data if not isinstance(key, str)),
+    )
+    if non_string_keys:
+        raise ConfigError(
+            path,
+            f"field names must be strings: {', '.join(non_string_keys)}",
+        )
     unknown = sorted(set(data) - allowed)
     if unknown:
         raise ConfigError(path, f"unknown field(s): {', '.join(unknown)}")
@@ -77,26 +119,41 @@ def _local_path(root: Path, value: str, path: str) -> Path:
 
 def _remote_root(value: str, path: str) -> str:
     parsed = PurePosixPath(value)
+    normalized = parsed.as_posix()
     if (
         not parsed.is_absolute()
         or value == "/"
+        or "//" in value
         or ".." in parsed.parts
-        or any(character.isspace() for character in value)
+        or not _REMOTE_ABSOLUTE_PATH_RE.fullmatch(value)
+        or normalized != value.rstrip("/")
     ):
         raise ConfigError(
             path,
-            "expected a non-root absolute POSIX path without whitespace or '..'",
+            "expected a normalized non-root absolute POSIX path using only "
+            "letters, digits, '.', '_', '-', and '/'",
         )
-    return value.rstrip("/")
+    return normalized
 
 
 def _relative_remote(value: str, path: str) -> str:
     parsed = PurePosixPath(value)
-    if parsed.is_absolute() or not parsed.parts or ".." in parsed.parts:
-        raise ConfigError(path, "expected a relative path below the remote root")
-    if any(part in {"", "."} for part in parsed.parts):
-        raise ConfigError(path, "must name a path below the remote root")
-    return parsed.as_posix()
+    normalized = parsed.as_posix()
+    if (
+        parsed.is_absolute()
+        or not parsed.parts
+        or "//" in value
+        or ".." in parsed.parts
+        or any(part in {"", "."} for part in parsed.parts)
+        or not _REMOTE_RELATIVE_PATH_RE.fullmatch(value)
+        or normalized != value
+    ):
+        raise ConfigError(
+            path,
+            "expected a normalized relative path using only letters, digits, "
+            "'.', '_', '-', and '/'",
+        )
+    return normalized
 
 
 def _parse_mount(value: Any, path: str) -> MountConfig:
@@ -232,7 +289,10 @@ def load_config(explicit: Path | str | None = None) -> WorkspaceConfig:
             )
 
     try:
-        payload = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        payload = yaml.load(
+            config_file.read_text(encoding="utf-8"),
+            Loader=_StrictSafeLoader,
+        )
     except yaml.YAMLError as exc:
         raise ConfigError("workspace", f"invalid YAML: {exc}") from exc
 
@@ -272,8 +332,16 @@ def load_config(explicit: Path | str | None = None) -> WorkspaceConfig:
     target_data = _mapping(data.get("targets"), "targets")
     if not target_data:
         raise ConfigError("targets", "must contain at least one target")
+    non_string_targets = sorted(
+        (repr(name) for name in target_data if not isinstance(name, str)),
+    )
+    if non_string_targets:
+        raise ConfigError(
+            "targets",
+            f"target names must be strings: {', '.join(non_string_targets)}",
+        )
     targets = tuple(
-        _parse_target(str(name), value) for name, value in target_data.items()
+        _parse_target(name, value) for name, value in target_data.items()
     )
 
     default_target = data.get("default_target")

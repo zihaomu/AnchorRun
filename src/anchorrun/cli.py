@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from anchorrun.config import load_config
-from anchorrun.errors import AnchorRunError
+from anchorrun.errors import AnchorRunError, ConfigError
 from anchorrun.remote import (
     execute_remote,
     local_issues,
@@ -16,6 +16,13 @@ from anchorrun.remote import (
     pull_artifacts,
     sync_workspace,
 )
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("expected a positive integer")
+    return parsed
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -37,7 +44,7 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("--target", action="append", default=[])
     doctor.add_argument("--remote", action="store_true")
     doctor.add_argument("--json", action="store_true", dest="as_json")
-    doctor.add_argument("--timeout", type=int, default=20)
+    doctor.add_argument("--timeout", type=_positive_int, default=20)
 
     prepare = commands.add_parser(
         "prepare",
@@ -153,6 +160,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "exec":
             command_args = _clean_remainder(args.command_args)
+            if not command_args:
+                raise ConfigError("command", "expected a command after --")
             if not args.no_sync:
                 sync_workspace(config, target, dry_run=args.dry_run)
             execute_remote(target, command_args, dry_run=args.dry_run)

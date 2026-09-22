@@ -39,6 +39,23 @@ class CommandTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "remote deletion is disabled"):
             build_sync_command(self.config, self.target, delete=True)
 
+    def test_delete_requires_both_config_and_cli_gate(self) -> None:
+        config_root = self.root / "delete-enabled"
+        config_root.mkdir()
+        path = write_config(config_root)
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "allow_delete: false", "allow_delete: true"
+            ),
+            encoding="utf-8",
+        )
+        config = load_config(path)
+
+        self.assertNotIn("--delete", build_sync_command(config, config.target()))
+        self.assertIn(
+            "--delete", build_sync_command(config, config.target(), delete=True)
+        )
+
     def test_remote_exec_quotes_each_argument(self) -> None:
         command = build_remote_exec(
             self.target,
@@ -49,6 +66,13 @@ class CommandTests(unittest.TestCase):
         parsed = shlex.split(command[-1])
         self.assertEqual(parsed[-3:], ["python", "-c", "print('hello world')"])
         self.assertIn("/srv/work/project:/workspace", parsed)
+
+    def test_remote_exec_preserves_shell_metacharacters_as_one_argument(self) -> None:
+        payload = "$(touch /tmp/should-not-run); echo unsafe"
+
+        command = build_remote_exec(self.target, ["printf", "%s", payload])
+
+        self.assertEqual(shlex.split(command[-1])[-1], payload)
 
     def test_pull_has_explicit_remote_and_local_roots(self) -> None:
         command, destination = build_pull_command(

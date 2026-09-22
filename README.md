@@ -15,7 +15,8 @@ The project has three deliberately separate layers:
 ## Install for development
 
 ```bash
-cd /home/zmu/wsl_shared/my_linux_project/AnchorRun
+git clone https://github.com/zihaomu/AnchorRun.git
+cd AnchorRun
 uv tool install --editable .
 ```
 
@@ -26,9 +27,7 @@ To make the bundled skill available from every project, link it into the Codex
 skill directory:
 
 ```bash
-ln -s \
-  /home/zmu/wsl_shared/my_linux_project/AnchorRun/skills/anchorrun \
-  /home/zmu/.codex/skills/anchorrun
+ln -s "$PWD/skills/anchorrun" "${CODEX_HOME:-$HOME/.codex}/skills/anchorrun"
 ```
 
 ## Configure a project
@@ -83,8 +82,8 @@ unless one or more explicit `--target NAME` arguments are supplied.
 ## Safety model
 
 - SSH destinations must be simple aliases from the user's SSH configuration.
-- Remote roots must be non-root absolute paths and cannot contain whitespace or
-  parent traversal.
+- Remote roots and artifact paths use a conservative, normalized POSIX-path
+  character set so they remain safe when passed through rsync's remote shell.
 - Container images must be pinned by `sha256` digest.
 - Project, state, and artifact destinations must remain within the local project
   root.
