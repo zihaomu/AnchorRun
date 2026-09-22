@@ -20,8 +20,8 @@ cd AnchorRun
 uv tool install --editable .
 ```
 
-If `uv` is unavailable, install into an active Python environment with
-`python -m pip install -e .`.
+If `uv` is unavailable, make sure Python 3 and pip are installed, then install
+into an active Python environment with `python3 -m pip install -e .`.
 
 To make the bundled skill available from every project, link it into the Codex
 skill directory:
