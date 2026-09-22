@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "anchorrun"
+version = "0.1.0"
+description = "Keep local source authoritative while running work in configured remote containers."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.urls]
+Repository = "https://github.com/zihaomu/AnchorRun"
+
+[project.scripts]
+anchorrun = "anchorrun.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/anchorrun"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,38 @@
+schema_version: 1
+
+project:
+  local_root: .
+  state_dir: ./.anchorrun
+
+default_target: lab-gpu
+
+sync:
+  allow_delete: false
+  excludes:
+    - .git/
+    - .anchorrun/
+    - __pycache__/
+    - "*.pyc"
+
+targets:
+  lab-gpu:
+    ssh_host: my-gpu-host
+    remote_root: /home/my-user/workspaces/my-project
+    container:
+      runtime: docker
+      image: registry.example.com/team/dev@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      workdir: /workspace
+      shell: /bin/bash
+      devices:
+        - /dev/kfd
+        - /dev/dri
+      security_options:
+        - seccomp=unconfined
+      mounts: []
+      environment_from_host: []
+
+artifacts:
+  - remote: outputs
+    local: artifacts/outputs
+  - remote: reports
+    local: artifacts/reports
