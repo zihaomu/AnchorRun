@@ -1,0 +1,47 @@
+# Migration example for the existing radeon-kernel-workspace.
+# Copy this file to that workspace root as .anchorrun.yaml before use.
+schema_version: 1
+
+project:
+  local_root: ./radeon-kernels
+  state_dir: ./lab-private/anchorrun
+
+default_target: r9700-8gpu
+
+sync:
+  allow_delete: false
+  excludes:
+    - .git/
+    - __pycache__/
+    - "*.pyc"
+    - .pytest_cache/
+    - .venv/
+
+targets:
+  r9700-8gpu:
+    ssh_host: Radeon-R9700-New-8GPU
+    remote_root: /home/zihaomu/radeon-kernels-workspace
+    container:
+      runtime: docker
+      image: crpi-ygzb1jbfyj9pjrm6.cn-shenzhen.personal.cr.aliyuncs.com/images_hana/freetoken@sha256:f28c91d42b4dd9e173190fe7da3c233fc19957ea6dc06b0e06afc3052264feb6
+      workdir: /home/zihaomu/zihaomu_workspace/radeon_kernels_workspace
+      shell: /bin/bash
+      devices: [/dev/kfd, /dev/dri]
+      security_options: [seccomp=unconfined]
+      mounts: []
+      environment_from_host: []
+
+  halo4:
+    ssh_host: halo4-shanghai-zihaomu
+    remote_root: /home/zihaomu/radeon-kernels-workspace
+    container:
+      runtime: docker
+      image: ghcr.io/inferstation/vllm-rocm-halo@sha256:13d6a8e2de3e582c42d4067469c0da0c21bedd117f77a9fe95934312ee052663
+      workdir: /home/zihaomu/zihaomu_workspace/radeon_kernels_workspace
+      shell: /bin/bash
+      devices: [/dev/kfd, /dev/dri]
+      security_options: [seccomp=unconfined]
+      mounts: []
+      environment_from_host: []
+
+artifacts: []
