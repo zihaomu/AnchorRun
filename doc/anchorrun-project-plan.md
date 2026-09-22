@@ -149,7 +149,7 @@ Agent Skill
 - `doctor`、`prepare`、`show`、`sync`、`exec`、`shell`、`pull` 命令。
 - 只允许拉回配置声明的产物目录。
 - Codex Skill 保持为薄适配层。
-- 当前 11 个单元测试通过。
+- 当前 37 个单元测试通过，覆盖配置安全、命令生成、远端编排与 CLI 分发。
 
 这些基础应当保留，不需要重写 SSH、rsync 和容器执行层。
 

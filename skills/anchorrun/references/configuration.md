@@ -56,9 +56,13 @@ options or shell syntax. Authentication belongs in SSH configuration rather than
 this file.
 
 `remote_root` is the host-side copy of the project. It must be a non-root absolute
-POSIX path. The CLI mounts it at `container.workdir` for every container command.
+POSIX path. Remote paths use a conservative normalized character set and reject
+shell metacharacters because rsync passes remote operands through a shell. The CLI
+mounts the root at `container.workdir` for every container command.
 
-Images must be immutable digest references. Tags such as `latest` are rejected.
+Images must be immutable digest references, use a conservative OCI reference
+character set, and cannot begin with an option marker. Tags such as `latest` are
+rejected.
 
 Additional mounts use host-side absolute `source` and container-side absolute
 `target` paths:
