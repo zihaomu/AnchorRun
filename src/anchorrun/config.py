@@ -193,9 +193,10 @@ def _parse_container(value: Any, path: str) -> ContainerConfig:
             "expected an immutable image ending in @sha256:<64 hex characters>",
         )
     workdir = _remote_root(_required_string(data, "workdir", path), f"{path}.workdir")
-    shell = data.get("shell", "/bin/bash")
-    if not isinstance(shell, str) or not PurePosixPath(shell).is_absolute():
-        raise ConfigError(f"{path}.shell", "expected an absolute container path")
+    shell_value = (
+        _required_string(data, "shell", path) if "shell" in data else "/bin/bash"
+    )
+    shell = _remote_root(shell_value, f"{path}.shell")
 
     devices = _string_list(data.get("devices", []), f"{path}.devices")
     for index, device in enumerate(devices):
@@ -289,10 +290,12 @@ def load_config(explicit: Path | str | None = None) -> WorkspaceConfig:
             )
 
     try:
-        payload = yaml.load(
-            config_file.read_text(encoding="utf-8"),
-            Loader=_StrictSafeLoader,
-        )
+        contents = config_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ConfigError("workspace", f"could not read configuration: {exc}") from exc
+
+    try:
+        payload = yaml.load(contents, Loader=_StrictSafeLoader)
     except yaml.YAMLError as exc:
         raise ConfigError("workspace", f"invalid YAML: {exc}") from exc
 

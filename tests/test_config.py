@@ -101,6 +101,28 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "duplicate key 'allow_delete'"):
                 load_config(path)
 
+    def test_rejects_non_utf8_config_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".anchorrun.yaml"
+            path.write_bytes(b"\xff\xfe\x00")
+
+            with self.assertRaisesRegex(ConfigError, "could not read configuration"):
+                load_config(path)
+
+    def test_rejects_control_characters_in_container_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".anchorrun.yaml"
+            path.write_text(
+                config_text().replace(
+                    "      workdir: /workspace",
+                    '      workdir: /workspace\n      shell: "/bin/bash\\0oops"',
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "control character"):
+                load_config(path)
+
     def test_rejects_artifact_escape(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / ".anchorrun.yaml"
