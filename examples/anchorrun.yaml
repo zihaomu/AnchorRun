@@ -1,14 +1,11 @@
-schema_version: 2
-default_target: gpu-a
-
+# Replace the aliases, paths and existing container name with your own.
+schema: anchorrun-context/v1
+default_target: dev
 targets:
-  gpu-a:
+  dev:
     ssh_host: gpu-a
-    remote_root: /home/my-user/projects/my-project
-    container:
-      image: python:3.11-slim
-  gpu-b:
+    workdir: /home/user/my-project
+  train:
     ssh_host: gpu-b
-    remote_root: /home/my-user/projects/my-project
-    container:
-      image: python:3.11-slim
+    container: project-dev
+    workdir: /workspace/my-project
