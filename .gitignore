@@ -7,3 +7,5 @@ dist/
 build/
 *.egg-info/
 .anchorrun/
+.coverage
+coverage.xml
