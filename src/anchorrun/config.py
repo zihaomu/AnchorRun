@@ -9,10 +9,8 @@ import yaml
 
 from anchorrun.errors import ConfigError
 from anchorrun.model import (
-    ArtifactConfig,
     ContainerConfig,
     MountConfig,
-    SyncConfig,
     TargetConfig,
     WorkspaceConfig,
 )
@@ -20,12 +18,10 @@ from anchorrun.model import (
 CONFIG_FILENAME = ".anchorrun.yaml"
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _SSH_ALIAS_RE = _NAME_RE
-_IMAGE_RE = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-fA-F]{64}$"
-)
+_IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:@sha256:[0-9a-fA-F]{64})?$")
+_USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*(?::[A-Za-z0-9_][A-Za-z0-9_.-]*)?$")
 _ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _REMOTE_ABSOLUTE_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
-_REMOTE_RELATIVE_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 _RUNTIMES = {"docker", "podman"}
 
 
@@ -107,16 +103,6 @@ def _string_list(value: Any, path: str) -> tuple[str, ...]:
     return tuple(result)
 
 
-def _local_path(root: Path, value: str, path: str) -> Path:
-    supplied = Path(value)
-    if supplied.is_absolute():
-        raise ConfigError(path, "must be relative to the configuration directory")
-    resolved = (root / supplied).resolve()
-    if not resolved.is_relative_to(root):
-        raise ConfigError(path, "must resolve inside the configuration directory")
-    return resolved
-
-
 def _remote_root(value: str, path: str) -> str:
     parsed = PurePosixPath(value)
     normalized = parsed.as_posix()
@@ -132,26 +118,6 @@ def _remote_root(value: str, path: str) -> str:
             path,
             "expected a normalized non-root absolute POSIX path using only "
             "letters, digits, '.', '_', '-', and '/'",
-        )
-    return normalized
-
-
-def _relative_remote(value: str, path: str) -> str:
-    parsed = PurePosixPath(value)
-    normalized = parsed.as_posix()
-    if (
-        parsed.is_absolute()
-        or not parsed.parts
-        or "//" in value
-        or ".." in parsed.parts
-        or any(part in {"", "."} for part in parsed.parts)
-        or not _REMOTE_RELATIVE_PATH_RE.fullmatch(value)
-        or normalized != value
-    ):
-        raise ConfigError(
-            path,
-            "expected a normalized relative path using only letters, digits, "
-            "'.', '_', '-', and '/'",
         )
     return normalized
 
@@ -176,6 +142,8 @@ def _parse_container(value: Any, path: str) -> ContainerConfig:
             "image",
             "workdir",
             "shell",
+            "entrypoint",
+            "user",
             "devices",
             "security_options",
             "mounts",
@@ -183,20 +151,36 @@ def _parse_container(value: Any, path: str) -> ContainerConfig:
         },
         path,
     )
-    runtime = _required_string(data, "runtime", path)
+    runtime = _required_string({"runtime": "docker", **data}, "runtime", path)
     if runtime not in _RUNTIMES:
         raise ConfigError(f"{path}.runtime", "expected docker or podman")
     image = _required_string(data, "image", path)
     if not _IMAGE_RE.fullmatch(image):
         raise ConfigError(
             f"{path}.image",
-            "expected an immutable image ending in @sha256:<64 hex characters>",
+            "expected an image name, tag, or @sha256:<64 hex characters>",
         )
-    workdir = _remote_root(_required_string(data, "workdir", path), f"{path}.workdir")
+    workdir = _remote_root(
+        _required_string({"workdir": "/workspace", **data}, "workdir", path),
+        f"{path}.workdir",
+    )
     shell_value = (
-        _required_string(data, "shell", path) if "shell" in data else "/bin/bash"
+        _required_string(data, "shell", path) if "shell" in data else "/bin/sh"
     )
     shell = _remote_root(shell_value, f"{path}.shell")
+    entrypoint = None
+    if "entrypoint" in data:
+        entrypoint = _remote_root(
+            _required_string(data, "entrypoint", path), f"{path}.entrypoint"
+        )
+    user = None
+    if "user" in data:
+        user = _required_string(data, "user", path)
+        if not _USER_RE.fullmatch(user):
+            raise ConfigError(
+                f"{path}.user",
+                "expected a user or uid, optionally followed by :group or :gid",
+            )
 
     devices = _string_list(data.get("devices", []), f"{path}.devices")
     for index, device in enumerate(devices):
@@ -218,6 +202,18 @@ def _parse_container(value: Any, path: str) -> ContainerConfig:
             _sequence(data.get("mounts", []), f"{path}.mounts")
         )
     )
+    destinations = [PurePosixPath(workdir), *(PurePosixPath(m.target) for m in mounts)]
+    for index, destination in enumerate(destinations):
+        for other in destinations[:index]:
+            if (
+                destination == other
+                or destination in other.parents
+                or other in destination.parents
+            ):
+                raise ConfigError(
+                    f"{path}.mounts",
+                    "mount targets must not overlap each other or workdir",
+                )
     return ContainerConfig(
         runtime=runtime,
         image=image,
@@ -229,6 +225,8 @@ def _parse_container(value: Any, path: str) -> ContainerConfig:
         ),
         mounts=mounts,
         environment_from_host=environment,
+        entrypoint=entrypoint,
+        user=user,
     )
 
 
@@ -251,19 +249,6 @@ def _parse_target(name: str, value: Any) -> TargetConfig:
             _required_string(data, "remote_root", path), f"{path}.remote_root"
         ),
         container=_parse_container(data.get("container"), f"{path}.container"),
-    )
-
-
-def _parse_artifact(value: Any, index: int, local_root: Path) -> ArtifactConfig:
-    path = f"artifacts[{index}]"
-    data = _mapping(value, path)
-    _reject_unknown(data, {"remote", "local"}, path)
-    remote = _relative_remote(_required_string(data, "remote", path), f"{path}.remote")
-    local_raw = _required_string(data, "local", path)
-    local_path = _local_path(local_root, local_raw, f"{path}.local")
-    return ArtifactConfig(
-        remote=remote,
-        local=local_path.relative_to(local_root).as_posix(),
     )
 
 
@@ -299,39 +284,19 @@ def load_config(explicit: Path | str | None = None) -> WorkspaceConfig:
     except yaml.YAMLError as exc:
         raise ConfigError("workspace", f"invalid YAML: {exc}") from exc
 
-    root = config_file.parent.resolve()
     data = _mapping(payload, "workspace")
+    if data.get("schema_version") == 1:
+        raise ConfigError(
+            "workspace.schema_version",
+            "schema v1 uses local-source synchronization and is not executed by v2. Migrate explicitly: verify the authoritative remote_root, remove project/sync/artifacts, set schema_version: 2, then run show, doctor and prepare. See doc/migration-v2.md",
+        )
+    if type(data.get("schema_version")) is not int or data["schema_version"] != 2:
+        raise ConfigError("workspace.schema_version", "expected 2")
     _reject_unknown(
         data,
-        {"schema_version", "project", "default_target", "sync", "targets", "artifacts"},
+        {"schema_version", "default_target", "targets"},
         "workspace",
     )
-    if data.get("schema_version") != 1:
-        raise ConfigError("workspace.schema_version", "expected 1")
-
-    project = _mapping(data.get("project"), "project")
-    _reject_unknown(project, {"local_root", "state_dir"}, "project")
-    local_root = _local_path(
-        root,
-        _required_string(project, "local_root", "project"),
-        "project.local_root",
-    )
-    state_dir = _local_path(
-        root,
-        _required_string(project, "state_dir", "project"),
-        "project.state_dir",
-    )
-
-    sync_data = _mapping(data.get("sync", {}), "sync")
-    _reject_unknown(sync_data, {"excludes", "allow_delete"}, "sync")
-    allow_delete = sync_data.get("allow_delete", False)
-    if not isinstance(allow_delete, bool):
-        raise ConfigError("sync.allow_delete", "expected a boolean")
-    sync = SyncConfig(
-        excludes=_string_list(sync_data.get("excludes", []), "sync.excludes"),
-        allow_delete=allow_delete,
-    )
-
     target_data = _mapping(data.get("targets"), "targets")
     if not target_data:
         raise ConfigError("targets", "must contain at least one target")
@@ -343,9 +308,7 @@ def load_config(explicit: Path | str | None = None) -> WorkspaceConfig:
             "targets",
             f"target names must be strings: {', '.join(non_string_targets)}",
         )
-    targets = tuple(
-        _parse_target(name, value) for name, value in target_data.items()
-    )
+    targets = tuple(_parse_target(name, value) for name, value in target_data.items())
 
     default_target = data.get("default_target")
     if default_target is None and len(targets) == 1:
@@ -358,21 +321,8 @@ def load_config(explicit: Path | str | None = None) -> WorkspaceConfig:
     if default_target not in {target.name for target in targets}:
         raise ConfigError("default_target", f"unknown target {default_target!r}")
 
-    artifacts = tuple(
-        _parse_artifact(item, index, local_root)
-        for index, item in enumerate(_sequence(data.get("artifacts", []), "artifacts"))
-    )
-    local_destinations = [artifact.local for artifact in artifacts]
-    if len(local_destinations) != len(set(local_destinations)):
-        raise ConfigError("artifacts", "local destinations must be unique")
-
     return WorkspaceConfig(
         config_file=config_file,
-        root=root,
-        local_root=local_root,
-        state_dir=state_dir,
         default_target=default_target,
-        sync=sync,
         targets=targets,
-        artifacts=artifacts,
     )

@@ -1,103 +1,95 @@
 from __future__ import annotations
 
 import shlex
-import tempfile
 import unittest
-from pathlib import Path
+from dataclasses import replace
 
 from anchorrun.commands import (
-    build_prepare_command,
-    build_pull_command,
-    build_remote_doctor_script,
+    CONFIG_LABEL,
+    IMAGE_LABEL,
+    build_container_create,
     build_remote_exec,
-    build_sync_command,
 )
-from anchorrun.config import load_config
-from anchorrun.errors import ConfigError
-from tests.helpers import write_config
+from anchorrun.model import ContainerConfig, MountConfig, TargetConfig
 
 
 class CommandTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
-        self.config = load_config(write_config(self.root))
-        self.target = self.config.target()
+    def setUp(self):
+        self.target = TargetConfig(
+            "gpu", "gpu-lab", "/srv/project", ContainerConfig("dev:v2")
+        )
 
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
+    def test_create_persistent_container_with_resolved_image(self):
+        argv = build_container_create(self.target, "sha256:" + "a" * 64)
+        self.assertEqual(argv[:2], ["docker", "create"])
+        self.assertNotIn("--rm", argv)
+        self.assertIn(f"{CONFIG_LABEL}={self.target.fingerprint}", argv)
+        self.assertIn(f"{IMAGE_LABEL}=sha256:" + "a" * 64, argv)
+        self.assertIn("type=bind,src=/srv/project,dst=/workspace", argv)
+        self.assertEqual(argv[argv.index("--entrypoint") + 1], "/bin/sh")
+        self.assertNotIn("dev:v2", argv)
 
-    def test_sync_is_push_only_and_has_no_delete_by_default(self) -> None:
-        command = build_sync_command(self.config, self.target)
-
-        self.assertEqual(command[0], "rsync")
-        self.assertNotIn("--delete", command)
-        self.assertEqual(command[-2], f"{self.root}/")
-        self.assertEqual(command[-1], "gpu-lab:/srv/work/project/")
-
-    def test_delete_requires_config_and_cli_gate(self) -> None:
-        with self.assertRaisesRegex(ConfigError, "remote deletion is disabled"):
-            build_sync_command(self.config, self.target, delete=True)
-
-    def test_delete_requires_both_config_and_cli_gate(self) -> None:
-        config_root = self.root / "delete-enabled"
-        config_root.mkdir()
-        path = write_config(config_root)
-        path.write_text(
-            path.read_text(encoding="utf-8").replace(
-                "allow_delete: false", "allow_delete: true"
+    def test_advanced_container_options_and_entrypoint(self):
+        target = replace(
+            self.target,
+            container=ContainerConfig(
+                "dev:v2",
+                runtime="podman",
+                entrypoint="/bin/bash",
+                user="1000",
+                devices=("/dev/kfd",),
+                security_options=("seccomp=unconfined",),
+                mounts=(
+                    MountConfig("/models", "/models"),
+                    MountConfig("/cache", "/cache", False),
+                ),
+                environment_from_host=("HF_TOKEN",),
             ),
-            encoding="utf-8",
         )
-        config = load_config(path)
+        argv = build_container_create(target, "sha256:" + "b" * 64)
+        self.assertEqual(argv[:2], ["podman", "create"])
+        for arg in (
+            "/bin/bash",
+            "--user",
+            "1000",
+            "--device",
+            "/dev/kfd",
+            "seccomp=unconfined",
+            "HF_TOKEN",
+        ):
+            self.assertIn(arg, argv)
+        self.assertIn("type=bind,src=/models,dst=/models,readonly", argv)
+        self.assertIn("type=bind,src=/cache,dst=/cache", argv)
 
-        self.assertNotIn("--delete", build_sync_command(config, config.target()))
-        self.assertIn(
-            "--delete", build_sync_command(config, config.target(), delete=True)
+    def test_exec_argument_boundaries_and_no_sync(self):
+        payload = "a b; $(touch /tmp/not-executed)\n'quoted'"
+        argv = build_remote_exec(
+            self.target, ["printf", "%s", payload], container_id="container-id"
         )
-
-    def test_remote_exec_quotes_each_argument(self) -> None:
-        command = build_remote_exec(
-            self.target,
-            ["python", "-c", "print('hello world')"],
+        self.assertEqual(
+            shlex.split(argv[-1]),
+            [
+                "docker",
+                "exec",
+                "--workdir",
+                "/workspace",
+                "container-id",
+                "printf",
+                "%s",
+                payload,
+            ],
         )
+        self.assertIn("-T", argv)
+        self.assertNotIn("rsync", argv)
+        self.assertIn("BatchMode=yes", argv)
 
-        self.assertEqual(command[:2], ["ssh", "gpu-lab"])
-        parsed = shlex.split(command[-1])
-        self.assertEqual(parsed[-3:], ["python", "-c", "print('hello world')"])
-        self.assertIn("/srv/work/project:/workspace", parsed)
-
-    def test_remote_exec_preserves_shell_metacharacters_as_one_argument(self) -> None:
-        payload = "$(touch /tmp/should-not-run); echo unsafe"
-
-        command = build_remote_exec(self.target, ["printf", "%s", payload])
-
-        self.assertEqual(shlex.split(command[-1])[-1], payload)
-
-    def test_pull_has_explicit_remote_and_local_roots(self) -> None:
-        command, destination = build_pull_command(
-            self.config,
-            self.target,
-            self.config.artifacts[0],
-        )
-
-        self.assertEqual(command[-2], "gpu-lab:/srv/work/project/outputs/")
-        self.assertEqual(command[-1], f"{self.root}/artifacts/outputs/")
-        self.assertEqual(destination, self.root / "artifacts" / "outputs")
-
-    def test_doctor_walks_to_an_existing_parent_without_mutation(self) -> None:
-        script = build_remote_doctor_script(self.target)
-
-        self.assertIn('while [ ! -e "$probe" ]', script)
-        self.assertNotIn("mkdir", script)
-
-    def test_prepare_is_explicit_and_uses_the_pinned_image(self) -> None:
-        command = build_prepare_command(self.target)
-
-        self.assertEqual(command[:2], ["ssh", "gpu-lab"])
-        self.assertIn("mkdir -p -- /srv/work/project", command[-1])
-        self.assertIn(self.target.container.image, command[-1])
-        self.assertIn("docker pull", command[-1])
+    def test_stdin_is_distinct_from_tty(self):
+        stream = build_remote_exec(self.target, ["cat"], stdin=True)
+        self.assertIn("-i", shlex.split(stream[-1]))
+        self.assertNotIn("-t", shlex.split(stream[-1]))
+        interactive = build_remote_exec(self.target, ["/bin/sh"], interactive=True)
+        self.assertIn("-t", interactive)
+        self.assertIn("-t", shlex.split(interactive[-1]))
 
 
 if __name__ == "__main__":

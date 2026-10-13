@@ -1,34 +1,32 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
+import hashlib
+import json
+from dataclasses import asdict, dataclass
+from pathlib import Path, PurePosixPath
 
 from anchorrun.errors import ConfigError
-
-
-@dataclass(frozen=True)
-class SyncConfig:
-    excludes: tuple[str, ...]
-    allow_delete: bool
 
 
 @dataclass(frozen=True)
 class MountConfig:
     source: str
     target: str
-    read_only: bool
+    read_only: bool = True
 
 
 @dataclass(frozen=True)
 class ContainerConfig:
-    runtime: str
     image: str
-    workdir: str
-    shell: str
-    devices: tuple[str, ...]
-    security_options: tuple[str, ...]
-    mounts: tuple[MountConfig, ...]
-    environment_from_host: tuple[str, ...]
+    runtime: str = "docker"
+    workdir: str = "/workspace"
+    shell: str = "/bin/sh"
+    entrypoint: str | None = None
+    user: str | None = None
+    devices: tuple[str, ...] = ()
+    security_options: tuple[str, ...] = ()
+    mounts: tuple[MountConfig, ...] = ()
+    environment_from_host: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -38,23 +36,31 @@ class TargetConfig:
     remote_root: str
     container: ContainerConfig
 
+    @property
+    def workspace_id(self) -> str:
+        # Host-local identity, independent of local paths and SSH alias spelling.
+        return hashlib.sha256(self.remote_root.encode()).hexdigest()
 
-@dataclass(frozen=True)
-class ArtifactConfig:
-    remote: str
-    local: str
+    @property
+    def container_name(self) -> str:
+        stem = PurePosixPath(self.remote_root).name[:32]
+        return f"anchorrun-{stem}-{self.workspace_id[:12]}"
+
+    @property
+    def fingerprint(self) -> str:
+        payload = {
+            "schema_version": 2,
+            "remote_root": self.remote_root,
+            "container": asdict(self.container),
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
 class WorkspaceConfig:
     config_file: Path
-    root: Path
-    local_root: Path
-    state_dir: Path
     default_target: str
-    sync: SyncConfig
     targets: tuple[TargetConfig, ...]
-    artifacts: tuple[ArtifactConfig, ...]
 
     def target(self, name: str | None = None) -> TargetConfig:
         selected = name or self.default_target
@@ -68,46 +74,16 @@ class WorkspaceConfig:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "config_file": str(self.config_file),
-            "root": str(self.root),
-            "project": {
-                "local_root": str(self.local_root),
-                "state_dir": str(self.state_dir),
-            },
             "default_target": self.default_target,
-            "sync": {
-                "allow_delete": self.sync.allow_delete,
-                "excludes": list(self.sync.excludes),
-            },
             "targets": {
                 target.name: {
                     "ssh_host": target.ssh_host,
                     "remote_root": target.remote_root,
-                    "container": {
-                        "runtime": target.container.runtime,
-                        "image": target.container.image,
-                        "workdir": target.container.workdir,
-                        "shell": target.container.shell,
-                        "devices": list(target.container.devices),
-                        "security_options": list(target.container.security_options),
-                        "mounts": [
-                            {
-                                "source": mount.source,
-                                "target": mount.target,
-                                "read_only": mount.read_only,
-                            }
-                            for mount in target.container.mounts
-                        ],
-                        "environment_from_host": list(
-                            target.container.environment_from_host
-                        ),
-                    },
+                    "container": asdict(target.container),
+                    "container_name": target.container_name,
                 }
                 for target in self.targets
             },
-            "artifacts": [
-                {"remote": artifact.remote, "local": artifact.local}
-                for artifact in self.artifacts
-            ],
         }
