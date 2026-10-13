@@ -1,294 +1,268 @@
 # AnchorRun
 
-> Source stays anchored. Compute runs remote.
+> Configure locally. Work remotely.
 
-AnchorRun keeps the local project tree—including projects hosted in WSL—as the
-source of truth while it runs builds, tests, and development commands inside a
-container on a configured remote machine.
+AnchorRun turns a local `.anchorrun.yaml` into a reliable entry point for an AI
+agent working on a remote Linux project. Source, Git history, datasets, models,
+build outputs and container state stay remote. Your WSL/local directory can
+contain **only the configuration file**.
 
-The project has three deliberately separate layers:
+- Configuration selects the SSH host, authoritative remote directory and image.
+- The CLI checks the environment and operates a reusable development container.
+- The bundled Skill guides the agent's remote reading, editing, testing and Git work.
 
-- `.anchorrun.yaml` contains per-project facts.
-- The `anchorrun` CLI performs deterministic SSH, rsync, and container work.
-- `skills/anchorrun` tells Codex when and how to use the CLI.
+There is no source synchronization, local source checkout, artifact registry or
+automatic download. Text read by the agent and command output still travel
+through the local client and may enter the model context.
 
-## Install for development
+**0.2 / schema v2 is a breaking change.** Schema v1 is rejected before any remote
+operation. Follow the [migration guide](doc/migration-v2.md) instead of merely
+changing the version number.
+
+## Install CLI and Skill
+
+Run in the WSL/Linux environment from which the agent will execute commands.
+Local requirements: Python 3.11+, SSH, and access to the configured machines.
+Remote requirements: Linux, Docker or Podman accessible to the SSH user, and
+a development image with a POSIX shell and `sleep`. Install project tools
+(Python, Git, compilers, etc.) in the image as needed. Local rsync is not required.
 
 ```bash
 git clone https://github.com/zihaomu/AnchorRun.git
 cd AnchorRun
 uv tool install --editable .
+anchorrun --help
 ```
 
-If `uv` is unavailable, make sure Python 3 and pip are installed, then install
-into an active Python environment with `python3 -m pip install -e .`.
+Without uv, use `python3 -m pip install -e .` in an active Python 3.11+ environment.
+Make sure the agent's shell can find `anchorrun`, not just your interactive shell.
+The checkout must stay in place for an editable installation.
 
-To make the bundled skill available from every project, link it into the Codex
-skill directory:
+The CLI installation does not install the Skill. In Codex you can ask:
+
+```text
+$skill-installer
+Install skills/anchorrun from https://github.com/zihaomu/AnchorRun
+```
+
+For local development, link the entire Skill directory (including references)
+from the checkout into the agent's skills directory:
 
 ```bash
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
 ln -s "$PWD/skills/anchorrun" "${CODEX_HOME:-$HOME/.codex}/skills/anchorrun"
 ```
 
-## Quick start: connect a local project to a remote machine
+If it already exists, inspect it before changing it. Existing installations
+linked to this checkout pick up Skill changes; separately downloaded copies
+need updating with the CLI. Refresh the agent's skill list or reopen it if needed.
 
-The setup below maps one local project directory to one directory on a remote
-Linux host, mounts that remote copy into a container, runs a command, and pulls
-declared outputs back to the local project.
+Other local agents can load the same `skills/anchorrun` folder from their
+supported skill directory, for example `~/.claude/skills/anchorrun` for Claude
+Code or `~/.cursor/skills/anchorrun` for Cursor. A Skill does not supply SSH
+credentials, CLI installation or network access to a cloud-hosted agent.
 
-### 1. Configure an SSH alias
+## Connect a new local directory to two machines
 
-Add the remote machine to `~/.ssh/config` on the local or WSL machine:
+### 1. Configure SSH
+
+Keep connection details and credentials in local `~/.ssh/config`:
 
 ```sshconfig
-Host gpu-lab
-    HostName 192.168.1.100
+Host gpu-a
+    HostName 192.168.1.101
+    User my-user
+    IdentityFile ~/.ssh/id_ed25519
+
+Host gpu-b
+    HostName 192.168.1.102
     User my-user
     IdentityFile ~/.ssh/id_ed25519
 ```
 
-Verify that non-interactive SSH works before configuring AnchorRun:
+Verify the host keys and login interactively once. Then check non-interactive
+access, which AnchorRun uses:
 
 ```bash
-ssh -o BatchMode=yes gpu-lab 'hostname && id -un'
+ssh -o BatchMode=yes gpu-a 'hostname && id'
+ssh -o BatchMode=yes gpu-b 'hostname && id'
 ```
 
-AnchorRun accepts an SSH configuration alias such as `gpu-lab`; do not put SSH
-options, passwords, or shell commands in `.anchorrun.yaml`.
+The SSH user also needs permission to operate the remote container runtime.
+AnchorRun does not install Docker, change group membership or enable sudo.
 
-### 2. Add `.anchorrun.yaml` to the project root
-
-For a new project directory:
+### 2. Create the local entry directory
 
 ```bash
-mkdir -p ~/projects/my-project
-cd ~/projects/my-project
-cp /path/to/AnchorRun/examples/anchorrun.yaml .anchorrun.yaml
+mkdir -p ~/projects/my-project-entry
+cd ~/projects/my-project-entry
 ```
 
-Edit `.anchorrun.yaml` so that its SSH alias, remote directory, image, mounts,
-and artifact paths match the project:
+Create `.anchorrun.yaml` here:
 
 ```yaml
-schema_version: 1
-
-project:
-  local_root: .
-  state_dir: ./.anchorrun
-
-default_target: gpu
-
-sync:
-  allow_delete: false
-  excludes:
-    - .git/
-    - .anchorrun/
-    - __pycache__/
-    - "*.pyc"
-    - artifacts/
+schema_version: 2
+default_target: gpu-a
 
 targets:
-  gpu:
-    ssh_host: gpu-lab
-    remote_root: /home/my-user/anchorrun-workspaces/my-project
+  gpu-a:
+    ssh_host: gpu-a
+    remote_root: /home/my-user/projects/my-project
     container:
-      runtime: docker
-      image: registry.example.com/team/dev@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-      workdir: /workspace
-      shell: /bin/bash
-      devices: []
-      security_options: []
-      mounts:
-        - source: /data/models
-          target: /models
-          read_only: true
-        - source: /data/datasets
-          target: /datasets
-          read_only: true
-      environment_from_host: []
-
-artifacts:
-  - remote: outputs
-    local: artifacts/outputs
-  - remote: reports
-    local: artifacts/reports
+      image: python:3.11-slim
+  gpu-b:
+    ssh_host: gpu-b
+    remote_root: /home/my-user/projects/my-project
+    container:
+      image: python:3.11-slim
 ```
 
-Use a different `remote_root` for every project. The additional mount sources,
-such as `/data/models`, must already exist on the remote host; AnchorRun does not
-copy model or dataset directories from the local machine.
+Replace the host aliases, directories and images with your own. The same path
+on different machines represents independent source trees. AnchorRun does not
+copy changes between them; use Git on each target when you need matching commits.
 
-For AMD GPUs, a target will commonly add:
+Defaults: `runtime: docker`, `workdir: /workspace`, `shell: /bin/sh`.
+A single target needs no `default_target`.
+Optional GPU devices, mounts, user and environment settings are documented in
+the [configuration reference](skills/anchorrun/references/configuration.md).
+The [Radeon example](examples/radeon-kernel-workspace.yaml) shows two GPU targets.
 
-```yaml
-devices:
-  - /dev/kfd
-  - /dev/dri
-security_options:
-  - seccomp=unconfined
-```
+### 3. Check and prepare
 
-Images must use an immutable digest rather than a tag such as `latest`. One way
-to retrieve the digest on the remote host is:
+From the entry directory or a descendant:
 
 ```bash
-ssh gpu-lab \
-  'docker pull registry.example.com/team/dev:tag &&
-   docker image inspect --format "{{index .RepoDigests 0}}" registry.example.com/team/dev:tag'
+anchorrun show
+anchorrun doctor --local
+anchorrun doctor --target gpu-a
+anchorrun prepare --target gpu-a
+anchorrun doctor --target gpu-a
+
+anchorrun prepare --target gpu-b
+anchorrun doctor --target gpu-b
 ```
 
-Log in to a private registry on the remote host first. For Podman targets,
-replace `docker` with `podman` in both the configuration and command.
+The first remote doctor may report not-ready because the managed container
+does not exist yet. `prepare` creates the remote directory if needed, resolves
+the image (pulling only if absent locally on that host), and creates/starts a
+named development container. Repeating it reuses the same container.
 
-The resulting path mapping is:
+Existing source in `remote_root` is kept. Additional mount sources must already
+exist. AnchorRun does not clone a repository or install project dependencies
+implicitly. For a new remote project, create files or clone explicitly through
+`exec` using an image that contains Git.
+
+### 4. Work directly on remote files
+
+```bash
+anchorrun exec --target gpu-a -- pwd
+anchorrun exec --target gpu-a -- ls -la
+anchorrun exec --target gpu-a -- python -c 'print("ready")'
+```
+
+The command starts in `/workspace`, bound to the chosen host's `remote_root`.
+Use an explicit shell for pipes or redirects. Keep the script quoted so that
+expansion and file operations happen remotely:
+
+```bash
+anchorrun exec --target gpu-a -- sh -c 'mkdir -p outputs && printf "%s\n" ready > outputs/result.txt'
+anchorrun exec --target gpu-a -- cat outputs/result.txt
+```
+
+To write through stdin without a local source file:
+
+```bash
+anchorrun exec --target gpu-a --stdin -- sh -c 'cat > hello.py' <<'PY'
+print("hello from the remote project")
+PY
+
+anchorrun exec --target gpu-a -- python hello.py
+```
+
+The quoted heredoc is a command payload, not a synchronized local source tree.
+For an existing remote Git repository, send a unified diff to
+`anchorrun exec --target gpu-a --stdin -- git apply --check -`, then send the
+same diff to `git apply -`, and inspect `git diff`. Git must be installed in
+that container. See the [remote editing workflow](skills/anchorrun/SKILL.md).
+
+Use `anchorrun shell --target gpu-a` for a human-operated interactive session.
+Each `exec` is a new process; shell `cd` and `export` do not persist between
+calls. Files and installed dependencies in the container do persist until it is
+explicitly replaced.
+
+### 5. Ask your agent to use the remote workspace
 
 ```text
-local project (project.local_root)
-        │  rsync, local to remote
-        ▼
-remote host (target.remote_root)
-        │  container bind mount
-        ▼
-container (target.container.workdir)
+请使用 AnchorRun Skill。当前目录只有远端配置。
+先检查 gpu-a 的环境，再在它的远端工作区读取源码、修改代码和运行测试。
+所有源码及 Git 操作都通过 AnchorRun 在远端完成。
+需要使用 gpu-b 时明确指定 target，不修改 default_target。
 ```
 
-The local project remains authoritative. Do not edit the synchronized remote
-copy and expect those changes to flow back automatically.
+A local file-editing tool still edits local files; configuration alone does not
+redirect it. The Skill instructs the agent to use remote commands and stdin
+patches. Credentials remain in SSH/registry configuration, outside this YAML.
 
-### 3. Validate and prepare the remote target
+## Container lifecycle and command contract
 
-Run these commands from the project root or any child directory. AnchorRun
-searches upward for `.anchorrun.yaml`.
+| Command | Behavior |
+| --- | --- |
+| `show [--target NAME]` | Resolve config, defaults and container names without connecting |
+| `doctor [--target NAME] [--json]` | Read-only remote checks; repeat `--target` to check multiple machines |
+| `doctor --local` | Validate config and local SSH availability only; reports valid, not remote-ready |
+| `prepare [--target NAME]` | Create or reuse this workspace's managed container |
+| `prepare --recreate` | Explicitly replace that managed container |
+| `exec [--target NAME] [--stdin] -- COMMAND...` | Execute with no synchronization or implicit preparation |
+| `shell [--target NAME]` | Interactive shell in the prepared container |
 
-```bash
-# Resolve and display the configuration without changing anything.
-anchorrun show
+Global `--config PATH` goes before the command. `prepare`, `exec` and `shell`
+support `--dry-run` without connecting. Dry-run describes intent, not observed
+remote state.
 
-# Check the local project, ssh, and rsync prerequisites.
-anchorrun doctor
+A container name is derived from the remote directory, so moving the local entry
+folder or renaming a target does not create another container. Labels record
+workspace identity, configuration fingerprint and resolved image ID. An
+incompatible existing container is rejected; unrelated containers are never
+adopted or removed.
 
-# Check SSH, the remote runtime, image, and path. A new target may be not-ready.
-anchorrun doctor --remote
+Changes to image, user, workdir, devices or mounts require
+`prepare --target NAME --recreate`. This stops the managed container and
+discards its writable layer, including container-only dependency installations.
+Remote bind-mounted source and data remain. Prepare does not automatically
+refresh a cached image tag: pull the desired tag explicitly on the remote host,
+then recreate. Use a digest when reproducibility matters. Changing the remote
+root selects a different workspace and leaves the former container alone.
 
-# Create remote_root and pull the pinned image if it is absent.
-anchorrun prepare
+`exec` preserves command stdout, stderr and exit status. Context diagnostics
+go to stderr. `--stdin` streams bytes without a TTY; readiness checks do not
+consume that input. Configuration/startup errors return 2, failed doctor checks
+return 1, and SSH transport failures use 255. A remote command may itself return
+255, so use its diagnostic output to distinguish the cause.
 
-# The target should now report ready.
-anchorrun doctor --remote
-```
+A reusable container is not a job scheduler or a persistent shell. Disconnected
+long-running tasks are not automatically tracked or recovered. Use an explicit
+remote task/session manager for that workflow. Container isolation and SSH
+permissions determine access; a configured workdir is not a security sandbox.
 
-`prepare` initializes only the configured target. It does not upload source or
-create additional model and dataset mount sources.
-
-### 4. Preview synchronization and execute
-
-Preview the first local-to-remote synchronization:
-
-```bash
-anchorrun sync --dry-run
-```
-
-Normal commands can then use `exec` directly. It synchronizes the local project
-before starting the configured remote container:
-
-```bash
-anchorrun exec -- python -m pytest
-```
-
-Use an explicit shell when the command contains pipes, redirects, or `&&`:
-
-```bash
-anchorrun exec -- bash -lc 'cmake -S . -B build && cmake --build build -j'
-```
-
-Use `anchorrun shell` only when an interactive container session is needed.
-
-### 5. Pull declared artifacts
-
-Artifact paths are relative to `remote_root`. With `workdir: /workspace`, a
-program that writes `/workspace/outputs/result.json` creates
-`remote_root/outputs/result.json` on the remote host. The mapping above pulls it
-to `artifacts/outputs/result.json` locally.
-
-The declared remote directories must exist before `pull`. To verify the complete
-flow before the project produces real artifacts, create deterministic smoke-test
-files in both declared directories:
-
-```bash
-anchorrun exec -- bash -lc 'mkdir -p outputs reports &&
-  printf "%s\n" "AnchorRun output smoke test" > outputs/anchorrun-smoke.txt &&
-  printf "%s\n" "AnchorRun report smoke test" > reports/anchorrun-smoke.txt'
-```
-
-```bash
-anchorrun pull --dry-run
-anchorrun pull
-```
-
-Only paths declared under `artifacts` can be pulled. Normal synchronization is
-local-to-remote only, and remote deletion additionally requires both
-`sync.allow_delete: true` and an explicit `anchorrun sync --delete`.
-
-`examples/radeon-kernel-workspace.yaml` contains a fuller Radeon workspace
-migration example.
-
-## Command reference
-
-```bash
-# Validate configuration and local prerequisites.
-anchorrun doctor
-
-# Also test SSH, the container runtime, the image, and remote path access.
-anchorrun doctor --remote
-
-# Explicit setup step: create the remote root and pull the pinned image if absent.
-anchorrun prepare
-
-# Show the fully resolved configuration without changing anything.
-anchorrun show
-
-# Preview or perform a local-to-remote synchronization.
-anchorrun sync --dry-run
-anchorrun sync
-
-# Synchronize, then execute inside the configured remote container.
-anchorrun exec -- python -m pytest
-
-# Start an interactive container shell.
-anchorrun shell
-
-# Pull only the configured artifact directories back into the local project.
-anchorrun pull --dry-run
-anchorrun pull
-```
-
-Use `--target NAME` with `doctor`, `prepare`, `sync`, `exec`, `shell`, or `pull`
-to override the configured default target. `doctor` checks the default target
-unless one or more explicit `--target NAME` arguments are supplied.
-
-## Safety model
-
-- SSH destinations must be simple aliases from the user's SSH configuration.
-- Remote roots and artifact paths use a conservative, normalized POSIX-path
-  character set so they remain safe when passed through rsync's remote shell.
-- Container images must be pinned by `sha256` digest.
-- Project, state, and artifact destinations must remain within the local project
-  root.
-- Synchronization does not delete remote files unless two independent gates are
-  enabled.
-- Interactive commands never change which target is selected implicitly.
-- Credentials stay in SSH configuration, credential stores, or environment
-  variables; they do not belong in `.anchorrun.yaml`.
-
-## Development
+## Verify and develop
 
 ```bash
 uv run python -m unittest discover -s tests -v
 uvx ruff check .
-python3 /home/zmu/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
-  skills/anchorrun
+uv build
 ```
 
-## License
+The opt-in [two-host smoke test](tests/remote_smoke.py) checks repeated prepare,
+remote file creation, Git patches/diffs, rejected patches, container persistence,
+binary stdin, quoting, stdout/stderr, exit status and target isolation:
 
-AnchorRun is licensed under the [Apache License 2.0](LICENSE).
+```bash
+uv run python -m tests.remote_smoke --config /path/to/disposable-entry/.anchorrun.yaml
+```
+
+It requires two dedicated remote roots named `anchorrun-v2-smoke.<random>`,
+images with Python 3 and Git, and an entry directory containing only the config.
+It leaves test fixtures and containers for inspection. Do not use a production
+project directory. See [validation evidence](doc/validation-v2.md).
+
+AnchorRun is licensed under [Apache-2.0](LICENSE).

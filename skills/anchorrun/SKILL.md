@@ -1,50 +1,78 @@
 ---
 name: anchorrun
-description: Use a local project as the source of truth while building, testing, or running it in a configured container on a remote machine through the anchorrun CLI. Use when a project contains .anchorrun.yaml or the user asks to work through AnchorRun. Do not use for ordinary local-only projects without that configuration.
+description: Operate a remote project through the anchorrun CLI using a local .anchorrun.yaml entry directory. Use for remote source inspection, edits, Git, builds and tests, or when the user asks to work through AnchorRun. Source and project state live remotely.
 ---
 
-# AnchorRun
+# AnchorRun remote workspace
 
-Treat the local project tree as authoritative. Let the CLI perform target selection,
-path validation, synchronization, SSH transport, and container invocation.
+The local folder is a connection/configuration entry point. The selected remote
+workspace is authoritative, including source and Git. Use the CLI for target
+selection, SSH and managed-container execution.
 
-## Workflow
+## Start a task
 
-1. Run `anchorrun doctor --remote` from anywhere inside the project before
-   the first remote operation of the task. If it reports `not-ready`, report the
-   exact failed check. Do not silently switch targets, images, or paths.
-   When the user is explicitly setting up or adapting the configured target, use
-   `anchorrun prepare` to create the remote root and fetch the pinned image,
-   then run the doctor again. Do not prepare unrelated targets.
-2. Make source edits only in the local project.
-3. Use `anchorrun exec -- <command...>` for non-interactive builds, tests,
-   benchmarks, and inspection commands. It synchronizes before execution.
-4. Use `anchorrun shell` only when the user explicitly needs an interactive
-   session.
-5. Use `anchorrun pull` only when declared remote artifacts need to be
-   copied back to the local project.
+1. Read `.anchorrun.yaml` and run `anchorrun show` to resolve the target and paths.
+   Respect a target named by the user; otherwise use the configured default.
+2. Run `anchorrun doctor --target NAME` before the first remote operation of the
+   task, and again after changing target or config. It checks remote readiness
+   by default; `doctor --local` validates only local prerequisites.
+3. During requested setup, use `anchorrun prepare --target NAME` and check again.
+   Ordinary source work does not authorize replacing an existing environment.
+   Report the exact failed check; do not silently change targets or images.
+4. Run searches, reads, edits, Git and tests through
+   `anchorrun exec --target NAME -- COMMAND...`.
+   Each call starts in the configured container workdir.
 
-Use `--target NAME` only when the user selects a non-default configured target or
-the task already names that target.
+For configuration or migration, first read
+[references/configuration.md](references/configuration.md).
+Schema v1 requires an explicit migration; never execute its old sync workflow
+with v2 or change its version number without checking remote source ownership.
 
-## Invariants
+## Remote reading and editing
 
-- Do not edit files directly on the remote workspace and later treat them as
-  source. Changes belong in the local project and flow outward.
-- Do not construct ad hoc `rsync`, `ssh`, `docker`, or `podman` commands for normal
-  work. Diagnose configuration or CLI failures instead of bypassing AnchorRun.
-- Never pass `--delete` unless the user explicitly asks to delete remote extras.
-  The CLI also requires `sync.allow_delete: true` as a second gate.
-- Do not pull undeclared paths or place artifacts outside the configured local
-  project root.
-- Do not place credentials in `.anchorrun.yaml`.
+Local read/edit tools still operate locally. Do not create a local source copy
+or use a local patch tool as though it edits remote files.
 
-When reporting a remote result, name the selected target, the command executed,
-and any artifact mapping pulled back. Avoid repeating full private registry names
-unless they are relevant to a failure.
+- Read and search through exec, for example `exec --target NAME -- rg pattern .`
+  or `exec --target NAME -- sed -n '1,160p' src/main.py`.
+- Inspect the remote Git status/diff before editing and preserve existing edits.
+- For unified patches, send the diff as stdin to
+  `exec --target NAME --stdin -- git apply --check -`, then send that same diff
+  to `exec --target NAME --stdin -- git apply -`. Review the remote diff and test.
+  Git must exist in the remote image; run inside the remote repository.
+- For small file creation or a project without Git, stream a quoted script via
+  `exec --target NAME --stdin -- python3 -` (if Python is present) or the
+  configured shell. Before replacing an existing file, check its expected
+  content and fail on a mismatch. Quote heredocs so local shell expansion cannot
+  modify the payload. Prefer atomic replacement for scripted rewrites.
+- Use `exec --target NAME -- sh -c '...'` for remote pipelines/redirection.
+  An unquoted `>` following the local CLI would write a local file.
+- Use `shell` for requested interactive sessions, not normal agent automation.
 
-## Configuration work
+Preflight checks do not consume stdin. Exec preserves binary streams and the
+remote exit code; context diagnostics use stderr. A failed command is a failed
+command, even when SSH itself succeeded.
 
-For setup, migration, or configuration diagnosis, read
-[references/configuration.md](references/configuration.md) before editing the
-project configuration.
+## Environment and target boundaries
+
+A prepared container is reused. Files/dependencies in its writable layer survive
+exec calls, but shell variables and cwd changes do not carry into another call.
+Keep important source, data and outputs in remote bind mounts.
+
+A changed config requires explicit `prepare --recreate`, which stops the managed
+container and discards its writable layer. Do not infer authorization to recreate
+from a failed test or a request to edit source. When recreation is authorized,
+bind-mounted source remains remote.
+
+Targets are independent workspaces; switching targets does not synchronize Git
+changes. Do not edit default_target to satisfy a single run. Inspect revision and
+dirty state on each target when comparing results.
+
+Normal work uses AnchorRun instead of ad hoc SSH/container commands. Initial SSH,
+registry and runtime setup may require host-side commands. Do not put credentials
+in the project config. Report target, command outcome and remote result paths.
+There is no automatic sync or pull. Download only when requested.
+
+This Skill routes behavior; it does not sandbox arbitrary commands or make
+remote text invisible to the local agent/model. It does not grant authority to
+publish commits or messages beyond the user's request.
